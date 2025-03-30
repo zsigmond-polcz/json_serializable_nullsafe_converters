@@ -295,15 +295,15 @@ _ConverterMatch? _compatibleMatch(
   final fieldType = jsonConverterSuper.typeArguments[0];
 
   // Allow assigning T to T?
-  //if (fieldType == targetType || fieldType == targetType.promoteNonNullable()) {
-  //  return _ConverterMatch(
-  //    annotation,
-  //    constantValue,
-  //    jsonConverterSuper.typeArguments[1],
-  //    null,
-  //    fieldType,
-  //  );
-  //}
+  if (fieldType == targetType /*|| fieldType == targetType.promoteNonNullable()*/) {
+    return _ConverterMatch(
+      annotation,
+      constantValue,
+      jsonConverterSuper.typeArguments[1],
+      null,
+      fieldType,
+    );
+  }
 
   if (fieldType is TypeParameterType && targetType is TypeParameterType) {
     assert(annotation?.element is! PropertyAccessorElement);
