@@ -17,10 +17,21 @@ Future<void> main() async {
     '_json_serializable_test_input.dart',
   );
 
+  final jsonSchemaTestReader = await initializeLibraryReaderForDirectory(
+    p.join('test', 'src'),
+    '_json_schema_test_input.dart',
+  );
+
   testAnnotatedElements(
     jsonSerializableTestReader,
     JsonSerializableGenerator(),
     expectedAnnotatedTests: _expectedAnnotatedTests,
+  );
+
+  testAnnotatedElements(
+    jsonSchemaTestReader,
+    JsonSerializableGenerator(),
+    expectedAnnotatedTests: _expectedSchemaTests,
   );
 
   final jsonEnumTestReader = await initializeLibraryReaderForDirectory(
@@ -42,6 +53,8 @@ Future<void> main() async {
 }
 
 const _expectedAnnotatedTests = {
+  '_BetterPrivateNames',
+  'annotatedMethod',
   'BadEnumDefaultValue',
   'BadFromFuncReturnType',
   'BadNoArgs',
@@ -49,6 +62,9 @@ const _expectedAnnotatedTests = {
   'BadToFuncReturnType',
   'BadTwoRequiredPositional',
   'CtorDefaultValueAndJsonKeyDefaultValue',
+  'CtorParamJsonKey',
+  'CtorParamJsonKeyWithExtends',
+  'DateTimeUtcTestClass',
   'DefaultDoubleConstants',
   'DefaultWithConstObject',
   'DefaultWithDisallowNullRequiredClass',
@@ -76,9 +92,9 @@ const _expectedAnnotatedTests = {
   'GenericClass',
   'IgnoreAndIncludeFromJsonFieldCtorClass',
   'IgnoreAndIncludeToJsonFieldCtorClass',
-  'IgnoreUnannotated',
   'IgnoredFieldClass',
   'IgnoredFieldCtorClass',
+  'IgnoreUnannotated',
   'IncludeIfNullDisallowNullClass',
   'IncludeIfNullOverride',
   'InvalidChildClassFromJson',
@@ -88,13 +104,14 @@ const _expectedAnnotatedTests = {
   'InvalidToFunc2Args',
   'Issue1038RegressionTest',
   'Issue713',
-  'JsonConvertOnField',
   'JsonConverterCtorParams',
   'JsonConverterDuplicateAnnotations',
   'JsonConverterNamedCtor',
   'JsonConverterNullableToNonNullable',
   'JsonConverterOnGetter',
   'JsonConverterWithBadTypeArg',
+  'JsonConvertOnField',
+  'JsonSchemaTestClass',
   'JsonValueValid',
   'JsonValueWithBool',
   'JustSetter',
@@ -118,16 +135,24 @@ const _expectedAnnotatedTests = {
   'OverrideGetterExampleI613',
   'PrivateFieldCtorClass',
   'PropInMixinI448Regression',
+  'RecordDoubleConverter',
+  'RecordNamedDoubleConverter',
+  'RecordNullableDoubleConverter',
+  'RecordSingleDoubleConverter',
+  'RecordWithFunction',
+  'RecordWithNamedFunction',
+  'RecordWithSinglePositionalFunction',
   'Reproduce869NullableGenericType',
   'Reproduce869NullableGenericTypeWithDefault',
   'SameCtorAndJsonKeyDefaultValue',
   'SetSupport',
+  'SubclassedJsonKey',
   'SubType',
   'SubTypeWithAnnotatedFieldOverrideExtends',
   'SubTypeWithAnnotatedFieldOverrideExtendsWithOverrides',
   'SubTypeWithAnnotatedFieldOverrideImplements',
-  'SubclassedJsonKey',
   'TearOffFromJsonClass',
+  'theAnswer',
   'ToJsonNullableFalseIncludeIfNullFalse',
   'TypedConvertMethods',
   'UnknownEnumValue',
@@ -140,13 +165,24 @@ const _expectedAnnotatedTests = {
   'UnsupportedEnum',
   'UnsupportedListField',
   'UnsupportedMapField',
+  'UnsupportedNestedFunctionType',
+  'UnsupportedMapKeyRecord',
   'UnsupportedSetField',
   'UnsupportedUriField',
   'ValidToFromFuncClassStatic',
   'WithANonCtorGetter',
   'WithANonCtorGetterChecked',
   'WrongConstructorNameClass',
-  '_BetterPrivateNames',
-  'annotatedMethod',
-  'theAnswer',
+};
+
+const _expectedSchemaTests = {
+  'JsonSchemaDocsTest',
+  'JsonSchemaCollectionsTest',
+  'JsonSchemaDefaultsTest',
+  'JsonSchemaNullableTest',
+  'JsonSchemaNestedTest',
+  'JsonSchemaNonCollectionTest',
+  'JsonSchemaGetterTest',
+  'JsonSchemaRecursiveListTest',
+  'JsonSchemaRecursiveListIssue',
 };

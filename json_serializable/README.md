@@ -30,13 +30,10 @@ import 'package:json_annotation/json_annotation.dart';
 
 part 'example.g.dart';
 
-@JsonSerializable()
+@JsonSerializable(createJsonSchema: true)
 class Person {
-  /// The generated code assumes these values exist in JSON.
   final String firstName, lastName;
 
-  /// The generated code below handles if the corresponding JSON value doesn't
-  /// exist or is empty.
   final DateTime? dateOfBirth;
 
   Person({required this.firstName, required this.lastName, this.dateOfBirth});
@@ -47,6 +44,9 @@ class Person {
 
   /// Connect the generated [_$PersonToJson] function to the `toJson` method.
   Map<String, dynamic> toJson() => _$PersonToJson(this);
+
+  /// The JSON Schema for this class.
+  static const jsonSchema = _$PersonJsonSchema;
 }
 ```
 
@@ -56,18 +56,29 @@ Building creates the corresponding part `example.g.dart`:
 part of 'example.dart';
 
 Person _$PersonFromJson(Map<String, dynamic> json) => Person(
-      firstName: json['firstName'] as String,
-      lastName: json['lastName'] as String,
-      dateOfBirth: json['dateOfBirth'] == null
-          ? null
-          : DateTime.parse(json['dateOfBirth'] as String),
-    );
+  firstName: json['firstName'] as String,
+  lastName: json['lastName'] as String,
+  dateOfBirth: json['dateOfBirth'] == null
+      ? null
+      : DateTime.parse(json['dateOfBirth'] as String),
+);
 
 Map<String, dynamic> _$PersonToJson(Person instance) => <String, dynamic>{
-      'firstName': instance.firstName,
-      'lastName': instance.lastName,
-      'dateOfBirth': instance.dateOfBirth?.toIso8601String(),
-    };
+  'firstName': instance.firstName,
+  'lastName': instance.lastName,
+  'dateOfBirth': instance.dateOfBirth?.toIso8601String(),
+};
+
+const _$PersonJsonSchema = {
+  r'$schema': 'https://json-schema.org/draft/2020-12/schema',
+  'type': 'object',
+  'properties': {
+    'firstName': {'type': 'string'},
+    'lastName': {'type': 'string'},
+    'dateOfBirth': {'type': 'string', 'format': 'date-time'},
+  },
+  'required': ['firstName', 'lastName'],
+};
 ```
 
 # Running the code generator
@@ -211,10 +222,7 @@ customize the encoding/decoding of any type, you have a few options.
       factory Sample3.fromJson(Map<String, dynamic> json) =>
           _$Sample3FromJson(json);
 
-      @JsonKey(
-        toJson: _toJson,
-        fromJson: _fromJson,
-      )
+      @JsonKey(toJson: _toJson, fromJson: _fromJson)
       final DateTime value;
 
       Map<String, dynamic> toJson() => _$Sample3ToJson(this);
@@ -256,6 +264,37 @@ customize the encoding/decoding of any type, you have a few options.
     }
     ```
 
+# JSON Schema Generation
+
+You can generate [JSON Schema](https://json-schema.org/) definitions for your annotated classes. This is useful for validation, documentation, or defining APIs.
+
+To enable this feature, set `createJsonSchema: true` on the [`JsonSerializable`] annotation:
+
+```dart
+@JsonSerializable(createJsonSchema: true)
+class Person {
+  // ...
+  /// The JSON Schema for this class.
+  static const jsonSchema = _$PersonJsonSchema;
+}
+```
+
+The generator will create a `static const` field named `_$ClassNameJsonSchema` containing the schema as a `Map<String, dynamic>`.
+
+Key features of the generated schema:
+*   **Separation of Concerns:** The schema generation logic is handled by a dedicated `JsonSchemaGenerator`.
+*   **Idiomatic Dart:** The output uses single quotes (`'`) for string literals.
+*   **Type Mapping:**
+    *   [`int`] maps to `integer`.
+    *   [`DateTime`] maps to `string` with `format: date-time`.
+    *   [`List`]/[`Set`] map to `array`.
+    *   [`Map`] maps to `object`.
+    *   Nested objects use `$ref` to reference their schema definitions.
+*   **Documentation:** Comments (`///`) on fields are included as `description` fields in the schema.
+*   **Defaults:** `defaultValue` from [`JsonKey`] is reflected in the schema.
+
+See the [Example](#example) above for a complete code sample.
+
 # Build configuration
 
 Aside from setting arguments on the associated annotation classes, you can also
@@ -277,8 +316,10 @@ targets:
           create_factory: true
           create_field_map: false
           create_json_keys: false
+          create_json_schema: false
           create_per_field_to_json: false
           create_to_json: true
+          date_time_utc: false
           disallow_unrecognized_keys: false
           explicit_to_json: false
           field_rename: none
@@ -310,15 +351,15 @@ targets:
 [`Enum`]: https://api.dart.dev/dart-core/Enum-class.html
 [`int`]: https://api.dart.dev/dart-core/int-class.html
 [`Iterable`]: https://api.dart.dev/dart-core/Iterable-class.html
-[`JsonConverter`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonConverter-class.html
-[`JsonEnum.valueField`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonEnum/valueField.html
-[`JsonEnum`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonEnum-class.html
-[`JsonKey.fromJson`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonKey/fromJson.html
-[`JsonKey.toJson`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonKey/toJson.html
-[`JsonKey`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonKey-class.html
-[`JsonLiteral`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonLiteral-class.html
-[`JsonSerializable`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonSerializable-class.html
-[`JsonValue`]: https://pub.dev/documentation/json_annotation/latest/json_annotation/JsonValue-class.html
+[`JsonConverter`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonConverter-class.html
+[`JsonEnum.valueField`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonEnum/valueField.html
+[`JsonEnum`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonEnum-class.html
+[`JsonKey.fromJson`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonKey/fromJson.html
+[`JsonKey.toJson`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonKey/toJson.html
+[`JsonKey`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonKey-class.html
+[`JsonLiteral`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonLiteral-class.html
+[`JsonSerializable`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonSerializable-class.html
+[`JsonValue`]: https://pub.dev/documentation/json_annotation/4.11.0/json_annotation/JsonValue-class.html
 [`List`]: https://api.dart.dev/dart-core/List-class.html
 [`Map`]: https://api.dart.dev/dart-core/Map-class.html
 [`num`]: https://api.dart.dev/dart-core/num-class.html
