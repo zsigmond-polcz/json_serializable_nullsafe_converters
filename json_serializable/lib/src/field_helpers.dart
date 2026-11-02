@@ -3,108 +3,38 @@
 // BSD-style license that can be found in the LICENSE file.
 
 import 'package:analyzer/dart/element/element.dart';
-import 'package:analyzer/src/dart/element/inheritance_manager3.dart' // ignore: implementation_imports
-    show InheritanceManager3;
-import 'package:source_gen/source_gen.dart';
+import 'package:source_helper/source_helper.dart';
 
-import 'utils.dart';
+export 'package:source_helper/source_helper.dart'
+    show createSortedFieldSet, fieldOverrideChain;
 
-class _FieldSet implements Comparable<_FieldSet> {
-  final FieldElement field;
-  final FieldElement sortField;
+// -----------------------------------------------------------------------------
+// json_serializable-internal shim.
+//
+// `_jsonKeyAnnotation` (utils.dart) and the converter lookup
+// (type_helpers/json_converter_helper.dart) receive only a [FieldElement] and
+// have no class in scope, so the override chain is recorded here by the
+// callers of [createSortedFieldSet] and looked up by field.
+// -----------------------------------------------------------------------------
 
-  _FieldSet._(this.field, this.sortField)
-    : assert(field.name == sortField.name);
+final _fieldHierarchyExpando = Expando<List<FieldElement>>();
 
-  factory _FieldSet(FieldElement? classField, FieldElement? superField) {
-    // At least one of these will != null, perhaps both.
-    final fields = [classField, superField].whereType<FieldElement>().toList();
+/// Returns [field] followed by any overridden superclass/superinterface
+/// [FieldElement]s in inheritance order, as recorded by
+/// [recordFieldOverrideChains]; `[field]` if nothing was recorded.
+List<FieldElement> fieldHierarchyFor(FieldElement field) =>
+    _fieldHierarchyExpando[field] ?? [field];
 
-    // Prefer the class field over the inherited field when sorting.
-    final sortField = fields.first;
-
-    // Prefer the field that's annotated with `JsonKey`, if any.
-    // If not, use the class field.
-    final fieldHasJsonKey = fields.firstWhere(
-      hasJsonKeyAnnotation,
-      orElse: () => fields.first,
-    );
-
-    return _FieldSet._(fieldHasJsonKey, sortField);
-  }
-
-  @override
-  int compareTo(_FieldSet other) => _sortByLocation(sortField, other.sortField);
-
-  static int _sortByLocation(FieldElement a, FieldElement b) {
-    final checkerA = TypeChecker.fromStatic(a.enclosingElement.thisType);
-
-    if (!checkerA.isExactly(b.enclosingElement)) {
-      // in this case, you want to prioritize the enclosingElement that is more
-      // "super".
-
-      if (checkerA.isAssignableFrom(b.enclosingElement)) {
-        return -1;
-      }
-
-      final checkerB = TypeChecker.fromStatic(b.enclosingElement.thisType);
-
-      if (checkerB.isAssignableFrom(a.enclosingElement)) {
-        return 1;
-      }
+/// Records the [fieldOverrideChain] of each of [fields] (the result of
+/// [createSortedFieldSet] for [element]) so [fieldHierarchyFor] can serve it.
+void recordFieldOverrideChains(
+  ClassElement element,
+  Iterable<FieldElement> fields,
+) {
+  for (final field in fields) {
+    final chain = fieldOverrideChain(element, field);
+    if (chain.length > 1) {
+      _fieldHierarchyExpando[field] = chain;
     }
-
-    /// Returns the offset of given field/property in its source file – with a
-    /// preference for the getter if it's defined.
-    int offsetFor(FieldElement e) {
-      if (e.isOriginGetterSetter) {
-        return (e.getter ?? e.setter)!.firstFragment.nameOffset ?? 0;
-      }
-      return e.firstFragment.nameOffset ?? 0;
-    }
-
-    return offsetFor(a).compareTo(offsetFor(b));
   }
 }
-
-/// Returns a [List] of all instance [FieldElement] items for [element] and
-/// super classes, sorted first by their location in the inheritance hierarchy
-/// (super first) and then by their location in the source file.
-List<FieldElement> createSortedFieldSet(ClassElement element) {
-  // Get all of the fields that need to be assigned
-  // TODO: support overriding the field set with an annotation option
-  final elementInstanceFields = Map.fromEntries(
-    element.fields.where((e) => !e.isStatic).map((e) => MapEntry(e.name, e)),
-  );
-
-  final inheritedFields = <String, FieldElement>{};
-  final manager = InheritanceManager3();
-
-  for (final v in manager.getInheritedConcreteMap(element).values) {
-    assert(v is! FieldElement);
-    if (_dartCoreObjectChecker.isExactly(v.enclosingElement!)) {
-      continue;
-    }
-
-    if (v is GetterElement) {
-      final variable = v.variable as FieldElement;
-      assert(!inheritedFields.containsKey(variable.name));
-      inheritedFields[variable.name!] = variable;
-    }
-  }
-
-  // Get the list of all fields for `element`
-  final allFields = elementInstanceFields.keys.toSet().union(
-    inheritedFields.keys.toSet(),
-  );
-
-  final fields =
-      allFields
-          .map((e) => _FieldSet(elementInstanceFields[e], inheritedFields[e]))
-          .toList()
-        ..sort();
-
-  return fields.map((fs) => fs.field).toList(growable: false);
-}
-
-const _dartCoreObjectChecker = TypeChecker.fromUrl('dart:core#Object');

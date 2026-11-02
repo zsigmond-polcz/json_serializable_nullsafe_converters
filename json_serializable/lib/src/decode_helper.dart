@@ -5,55 +5,35 @@
 import 'package:analyzer/dart/element/element.dart';
 import 'package:analyzer/dart/element/nullability_suffix.dart';
 import 'package:build/build.dart';
+import 'package:code_builder/code_builder.dart';
 import 'package:source_gen/source_gen.dart';
 import 'package:source_helper/source_helper.dart';
 
 import 'helper_core.dart';
-import 'json_literal_generator.dart';
 import 'type_helpers/generic_factory_helper.dart';
+import 'type_helpers/patch_tri_state_helper.dart';
 import 'unsupported_type_error.dart';
 import 'utils.dart';
 
 class CreateFactoryResult {
-  final String output;
+  final Method method;
   final Set<String> usedFields;
 
-  CreateFactoryResult(this.output, this.usedFields);
+  CreateFactoryResult(this.method, this.usedFields);
 }
 
 mixin DecodeHelper implements HelperCore {
   CreateFactoryResult createFactory(
     Map<String, FieldElement> accessibleFields,
-    Map<String, String> unavailableReasons,
-  ) {
+    Map<String, String> unavailableReasons, {
+    Iterable<FieldElement> explicitToJsonFields = const [],
+  }) {
     assert(config.createFactory);
-    final buffer = StringBuffer();
 
-    final mapType = config.anyMap ? 'Map' : 'Map<String, dynamic>';
-    buffer.write(
-      '$targetClassReference '
-      '${prefix}FromJson${genericClassArgumentsImpl(withConstraints: true)}'
-      '($mapType json',
-    );
+    Expression? lambdaExpr;
+    final fromJsonLines = <Code>[];
 
-    if (config.genericArgumentFactories) {
-      for (var arg in element.typeParameters) {
-        final helperName = fromJsonForType(
-          arg.instantiate(nullabilitySuffix: NullabilitySuffix.none),
-        );
-
-        buffer.write(', ${arg.name} Function(Object? json) $helperName');
-      }
-      if (element.typeParameters.isNotEmpty) {
-        buffer.write(',');
-      }
-    }
-
-    buffer.write(')');
-
-    final fromJsonLines = <String>[];
-
-    String deserializeFun(
+    Expression deserializeFun(
       String paramOrFieldName, {
       FormalParameterElement? ctorParam,
     }) => _deserializeForField(
@@ -84,154 +64,246 @@ mixin DecodeHelper implements HelperCore {
       accessibleFields.values.where(
         (fe) => data.usedCtorParamsAndFields.contains(fe.name),
       ),
+      explicitToJsonFields: explicitToJsonFields,
     ).toList();
 
     if (config.checked) {
-      final classLiteral = escapeDartString(element.name!);
-
-      final sectionBuffer = StringBuffer()
-        ..write('''
-  \$checkedCreate(
-    $classLiteral,
-    json,
-    (\$checkedConvert) {\n''')
-        ..write(checks.join())
-        ..write('''
-    final val = ${data.content};''');
-
-      for (final fieldName in data.fieldsToSet) {
-        sectionBuffer.writeln();
-        final fieldValue = accessibleFields[fieldName]!;
-        final safeName = safeNameAccess(fieldValue);
-        sectionBuffer
-          ..write('''
-    \$checkedConvert($safeName, (v) => ''')
-          ..write('val.$fieldName = ')
-          ..write(_deserializeForField(fieldValue, checkedProperty: true));
-
-        final readValueFunc = jsonKeyFor(fieldValue).readValueFunctionName;
-        if (readValueFunc != null) {
-          sectionBuffer.writeln(',readValue: $readValueFunc,');
-        }
-
-        sectionBuffer.write(');');
-      }
-
-      sectionBuffer.write('''\n    return val;
-  }''');
-
       final fieldKeyMap = Map.fromEntries(
         data.usedCtorParamsAndFields
             .map((k) => MapEntry(k, nameAccess(accessibleFields[k]!)))
             .where((me) => me.key != me.value),
       );
 
-      String fieldKeyMapArg;
-      if (fieldKeyMap.isEmpty) {
-        fieldKeyMapArg = '';
+      final closureBody = Block(
+        (b) => b
+          ..statements.addAll(checks)
+          ..statements.add(declareFinal('val').assign(data.content).statement)
+          ..statements.addAll(
+            data.fieldsToSet.map((fieldName) {
+              final fieldValue = accessibleFields[fieldName]!;
+              final safeName = safeNameAccess(fieldValue);
+              final readValueFunc = jsonKeyFor(
+                fieldValue,
+              ).readValueFunctionName;
+              final deserializeCall = _deserializeForField(
+                fieldValue,
+                checkedProperty: true,
+              );
+
+              return refer(r'$checkedConvert')
+                  .call(
+                    [
+                      CodeExpression(Code(safeName)),
+                      Method(
+                        (m) => m
+                          ..requiredParameters.add(
+                            Parameter((p) => p..name = 'v'),
+                          )
+                          ..lambda = true
+                          ..body = refer(
+                            'val',
+                          ).property(fieldName).assign(deserializeCall).code,
+                      ).closure,
+                    ],
+                    {
+                      if (readValueFunc != null)
+                        'readValue': refer(readValueFunc),
+                    },
+                  )
+                  .statement;
+            }),
+          )
+          ..statements.add(refer('val').returned.statement),
+      );
+
+      final checkedCreateCall = refer(r'$checkedCreate').call(
+        [
+          escapedStringLiteral(element.name!),
+          refer('json'),
+          Method(
+            (m) => m
+              ..requiredParameters.add(
+                Parameter((p) => p..name = r'$checkedConvert'),
+              )
+              ..body = closureBody,
+          ).closure,
+        ],
+        {
+          if (fieldKeyMap.isNotEmpty)
+            'fieldKeyMap': literalConstMap({
+              for (final MapEntry(:key, :value) in fieldKeyMap.entries)
+                escapedStringLiteral(key): escapedStringLiteral(value),
+            }),
+        },
+      );
+
+      lambdaExpr = checkedCreateCall;
+    } else {
+      if (data.fieldsToSet.isEmpty) {
+        if (checks.isEmpty) {
+          lambdaExpr = data.content;
+        } else {
+          fromJsonLines
+            ..addAll(checks)
+            ..add(data.content.returned.statement);
+        }
       } else {
-        final mapLiteral = jsonMapAsDart(fieldKeyMap);
-        fieldKeyMapArg = ', fieldKeyMap: const $mapLiteral';
-      }
+        // TODO: https://github.com/dart-lang/tools/issues/2524 - trailing
+        // space prevents `?..` collision in code_builder cascade emission.
+        final expr = data.fieldsToSet.fold<Expression>(
+          data.content,
+          (current, field) => current
+              .cascade(field)
+              .assign(
+                CodeExpression(Code('${toCodeString(deserializeFun(field))} ')),
+              ),
+        );
 
-      sectionBuffer
-        ..write(fieldKeyMapArg)
-        ..write(',);');
-      fromJsonLines.add(sectionBuffer.toString());
-    } else {
-      fromJsonLines.addAll(checks);
-
-      final sectionBuffer = StringBuffer()
-        ..write('''
-  ${data.content}''');
-      for (final field in data.fieldsToSet) {
-        sectionBuffer
-          ..writeln()
-          ..write('    ..$field = ')
-          ..write(deserializeFun(field));
+        if (checks.isEmpty) {
+          lambdaExpr = expr;
+        } else {
+          fromJsonLines
+            ..addAll(checks)
+            ..add(expr.returned.statement);
+        }
       }
-      sectionBuffer.writeln(';');
-      fromJsonLines.add(sectionBuffer.toString());
     }
 
-    if (fromJsonLines.length == 1) {
-      buffer
-        ..write('=>')
-        ..write(fromJsonLines.single);
-    } else {
-      buffer
-        ..write('{')
-        ..writeAll(fromJsonLines.take(fromJsonLines.length - 1))
-        ..write('return ')
-        ..write(fromJsonLines.last)
-        ..write('}');
-    }
+    final method = Method((m) {
+      m
+        ..name = '${prefix}FromJson'
+        ..returns = refer(targetClassReference)
+        ..types.addAll(genericClassTypeParameters)
+        ..requiredParameters.add(
+          Parameter(
+            (p) => p
+              ..name = 'json'
+              ..type = refer(config.anyMap ? 'Map' : 'Map<String, dynamic>'),
+          ),
+        );
 
-    return CreateFactoryResult(buffer.toString(), data.usedCtorParamsAndFields);
+      if (config.genericArgumentFactories) {
+        for (var arg in element.typeParameters) {
+          final helperName = fromJsonForType(
+            arg.instantiate(nullabilitySuffix: NullabilitySuffix.none),
+          );
+          m.requiredParameters.add(
+            Parameter(
+              (p) => p
+                ..name = helperName
+                ..type = refer('${arg.name} Function(Object? json)'),
+            ),
+          );
+        }
+      }
+
+      if (lambdaExpr != null) {
+        m
+          ..lambda = true
+          ..body = lambdaExpr.statement;
+      } else {
+        m.body = Block((b) => b.statements.addAll(fromJsonLines));
+      }
+    });
+
+    return CreateFactoryResult(method, data.usedCtorParamsAndFields);
   }
 
-  Iterable<String> _checkKeys(Iterable<FieldElement> accessibleFields) sync* {
-    final args = <String>[];
+  Iterable<Code> _checkKeys(
+    Iterable<FieldElement> accessibleFields, {
+    Iterable<FieldElement> explicitToJsonFields = const [],
+  }) sync* {
+    final args = <String, Expression>{};
 
-    String constantList(Iterable<FieldElement> things) =>
-        'const ${jsonLiteralAsDart(things.map<String>(nameAccess).toList())}';
+    Expression constantList(Iterable<FieldElement> things) => literalConstList(
+      things.map((fe) => CodeExpression(Code(safeNameAccess(fe)))).toList(),
+    );
 
     if (config.disallowUnrecognizedKeys) {
-      final allowKeysLiteral = constantList(accessibleFields);
-
-      args.add('allowedKeys: $allowKeysLiteral');
+      final allowedFields = [
+        ...accessibleFields,
+        ...explicitToJsonFields.where((fe) => !accessibleFields.contains(fe)),
+      ];
+      args['allowedKeys'] = constantList(allowedFields);
     }
 
     final requiredKeys = accessibleFields
         .where((fe) => jsonKeyFor(fe).required)
         .toList();
     if (requiredKeys.isNotEmpty) {
-      final requiredKeyLiteral = constantList(requiredKeys);
-
-      args.add('requiredKeys: $requiredKeyLiteral');
+      args['requiredKeys'] = constantList(requiredKeys);
     }
 
     final disallowNullKeys = accessibleFields
         .where((fe) => jsonKeyFor(fe).disallowNullValue)
         .toList();
     if (disallowNullKeys.isNotEmpty) {
-      final disallowNullKeyLiteral = constantList(disallowNullKeys);
-
-      args.add('disallowNullValues: $disallowNullKeyLiteral');
+      args['disallowNullValues'] = constantList(disallowNullKeys);
     }
 
     if (args.isNotEmpty) {
-      yield '\$checkKeys(json, ${args.map((e) => '$e, ').join()});\n';
+      yield refer(r'$checkKeys').call([refer('json')], args).statement;
     }
   }
 
   /// If [checkedProperty] is `true`, we're using this function to write to a
   /// setter.
-  String _deserializeForField(
+  Expression _deserializeForField(
     FieldElement field, {
     FormalParameterElement? ctorParam,
     bool checkedProperty = false,
   }) {
-    final jsonKeyName = safeNameAccess(field);
+    final jsonKeyName = CodeExpression(Code(safeNameAccess(field)));
     final targetType = ctorParam?.type ?? field.type;
     final contextHelper = getHelperContext(field);
     final jsonKey = jsonKeyFor(field);
     final defaultValue = jsonKey.defaultValue;
     final readValueFunc = jsonKey.readValueFunctionName;
+    final patchTriState = usesExplicitJsonNullWhenNonNullField(jsonKey);
 
-    String deserialize(String expression) => contextHelper
-        .deserialize(targetType, expression, defaultValue: defaultValue)
-        .toString();
+    Expression deserialize(
+      Expression expression, {
+      bool patchPresentValue = false,
+    }) => patchPresentValue
+        ? contextHelper.deserializePresentJsonValue(
+            targetType,
+            expression,
+            defaultValue: defaultValue,
+          )
+        : contextHelper.deserialize(
+            targetType,
+            expression,
+            defaultValue: defaultValue,
+          );
 
-    String value;
+    Expression value;
     try {
       if (config.checked) {
-        value = deserialize('v');
+        final deserializeV = deserialize(refer('v'));
+        if (patchTriState) {
+          validateExplicitJsonNullDeserialize(field, contextHelper, targetType);
+          value = wrapPatchTriStateCheckedConvert(
+            mapExpression: refer('json'),
+            jsonKeyName: jsonKeyName,
+            absentExpression: literalNull,
+            presentExpression: deserialize(refer('v'), patchPresentValue: true),
+          );
+        } else {
+          value = deserializeV;
+        }
         if (!checkedProperty) {
-          final readValueBit = readValueFunc == null
-              ? ''
-              : ',readValue: $readValueFunc,';
-          value = '\$checkedConvert($jsonKeyName, (v) => $value$readValueBit)';
+          value = refer(r'$checkedConvert').call(
+            [
+              jsonKeyName,
+              Method(
+                (m) => m
+                  ..requiredParameters.add(Parameter((p) => p..name = 'v'))
+                  ..lambda = true
+                  ..body = value.code,
+              ).closure,
+            ],
+            {if (readValueFunc != null) 'readValue': refer(readValueFunc)},
+          );
         }
       } else {
         assert(
@@ -239,11 +311,26 @@ mixin DecodeHelper implements HelperCore {
           'should only be true if `_generator.checked` is true.',
         );
 
-        value = deserialize(
-          readValueFunc == null
-              ? 'json[$jsonKeyName]'
-              : '$readValueFunc(json, $jsonKeyName)',
+        final jsonValueExpression = readValueFunc == null
+            ? refer('json').index(jsonKeyName)
+            : refer(readValueFunc).call([refer('json'), jsonKeyName]);
+
+        final deserializeValue = deserialize(
+          jsonValueExpression,
+          patchPresentValue: patchTriState,
         );
+
+        if (patchTriState) {
+          validateExplicitJsonNullDeserialize(field, contextHelper, targetType);
+          value = wrapPatchTriStateFromJson(
+            mapExpression: refer('json'),
+            jsonKeyName: jsonKeyName,
+            absentExpression: literalNull,
+            presentExpression: deserializeValue,
+          );
+        } else {
+          value = deserializeValue;
+        }
       }
     } on UnsupportedTypeError catch (e) // ignore: avoid_catching_errors
     {
@@ -264,12 +351,14 @@ mixin DecodeHelper implements HelperCore {
 }
 
 /// [availableConstructorParameters] is checked to see if it is available. If
-/// [availableConstructorParameters] does not contain the parameter name,
-/// an [UnsupportedError] is thrown.
+/// [availableConstructorParameters] does not contain the parameter name of a
+/// required or positional parameter, an [InvalidGenerationSourceError] is
+/// thrown. Unmatched optional named parameters are skipped.
 ///
 /// To improve the error details, [unavailableReasons] is checked for the
 /// unavailable constructor parameter. If the value is not `null`, it is
-/// included in the [UnsupportedError] message.
+/// included in the [InvalidGenerationSourceError] message; otherwise a default
+/// explanation is provided.
 ///
 /// [writableFields] are also populated, but only if they have not already
 /// been defined by a constructor parameter with the same name.
@@ -279,89 +368,77 @@ _ConstructorData _writeConstructorInvocation(
   Iterable<String> availableConstructorParameters,
   Iterable<String> writableFields,
   Map<String, String> unavailableReasons,
-  String Function(String paramOrFieldName, {FormalParameterElement ctorParam})
+  Expression Function(
+    String paramOrFieldName, {
+    FormalParameterElement ctorParam,
+  })
   deserializeForField,
 ) {
   final className = classElement.name;
 
   final ctor = constructorByName(classElement, constructorName);
 
-  final usedCtorParamsAndFields = <String>{};
-  final constructorArguments = <FormalParameterElement>[];
-  final namedConstructorArguments = <FormalParameterElement>[];
+  final plan = planConstruction(ctor, availableConstructorParameters.toSet());
 
-  for (final arg in ctor.formalParameters) {
-    if (!availableConstructorParameters.contains(arg.name)) {
-      if (arg.isRequired) {
-        var msg =
-            'Cannot populate the required constructor '
-            'argument: ${arg.name}.';
+  // Unmatched optional named parameters are skipped. An unmatched positional
+  // parameter cannot be skipped: it would shift every later positional
+  // argument into its slot.
+  final unpopulated = plan.unmatched
+      .where((arg) => arg.isRequired || arg.isPositional)
+      .firstOrNull;
+  if (unpopulated != null) {
+    var msg =
+        'Cannot populate the required constructor '
+        'argument: ${unpopulated.name}.';
 
-        final additionalInfo = unavailableReasons[arg.name];
+    final additionalInfo =
+        unavailableReasons[unpopulated.name] ??
+        'It does not correspond to any field or getter on the class.';
+    msg = '$msg $additionalInfo';
 
-        if (additionalInfo != null) {
-          msg = '$msg $additionalInfo';
-        }
-
-        throw InvalidGenerationSourceError(msg, element: ctor);
-      }
-
-      continue;
-    }
-
-    // TODO: validate that the types match!
-    if (arg.isNamed) {
-      namedConstructorArguments.add(arg);
-    } else {
-      constructorArguments.add(arg);
-    }
-    usedCtorParamsAndFields.add(arg.name!);
+    throw InvalidGenerationSourceError(msg, element: ctor);
   }
 
-  // fields that aren't already set by the constructor and that aren't final
+  final positionalArgs = [
+    for (final arg in plan.positional)
+      deserializeForField(arg.name!, ctorParam: arg),
+  ];
+  final namedArgs = {
+    for (final arg in plan.named)
+      arg.name!: deserializeForField(arg.name!, ctorParam: arg),
+  };
+
   final remainingFieldsForInvocationBody = writableFields.toSet().difference(
-    usedCtorParamsAndFields,
+    plan.consumedNames,
   );
 
-  final constructorExtra = constructorName.isEmpty ? '' : '.$constructorName';
+  final typeArguments = classElement.typeParameters
+      .map((t) => refer(t.name!))
+      .toList();
 
-  final buffer = StringBuffer()
-    ..write(
-      '$className'
-      '${genericClassArguments(classElement, false)}'
-      '$constructorExtra(',
-    )
-    ..writeAll(
-      constructorArguments.map((paramElement) {
-        final content = deserializeForField(
-          paramElement.name!,
-          ctorParam: paramElement,
-        );
-        return '      $content,\n';
-      }),
-    )
-    ..writeAll(
-      namedConstructorArguments.map((paramElement) {
-        final value = deserializeForField(
-          paramElement.name!,
-          ctorParam: paramElement,
-        );
-        return '      ${paramElement.name!}: $value,\n';
-      }),
-    )
-    ..write(')');
-
-  usedCtorParamsAndFields.addAll(remainingFieldsForInvocationBody);
+  Expression constructorInvocation;
+  if (constructorName.isEmpty) {
+    constructorInvocation = refer(
+      className!,
+    ).newInstance(positionalArgs, namedArgs, typeArguments);
+  } else {
+    constructorInvocation = refer(className!).newInstanceNamed(
+      constructorName,
+      positionalArgs,
+      namedArgs,
+      typeArguments,
+    );
+  }
 
   return _ConstructorData(
-    buffer.toString(),
+    constructorInvocation,
     remainingFieldsForInvocationBody,
-    usedCtorParamsAndFields,
+    {...plan.consumedNames, ...remainingFieldsForInvocationBody},
   );
 }
 
 class _ConstructorData {
-  final String content;
+  final Expression content;
   final Set<String> fieldsToSet;
   final Set<String> usedCtorParamsAndFields;
 

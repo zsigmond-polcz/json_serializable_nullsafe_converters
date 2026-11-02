@@ -5,28 +5,39 @@
 import 'package:analyzer/dart/constant/value.dart';
 import 'package:analyzer/dart/element/element.dart';
 import 'package:analyzer/dart/element/type.dart';
+import 'package:code_builder/code_builder.dart' hide RecordType;
 import 'package:json_annotation/json_annotation.dart';
 import 'package:source_gen/source_gen.dart';
 import 'package:source_helper/source_helper.dart';
 
+import '../field_helpers.dart';
 import '../lambda_result.dart';
+import '../shared_checkers.dart';
 import '../type_helper.dart';
 import '../utils.dart';
 
 /// A [TypeHelper] that supports classes annotated with implementations of
 /// [JsonConverter].
 class JsonConverterHelper extends TypeHelper<TypeHelperContextWithConfig> {
-  const JsonConverterHelper();
+  final bool forMapKey;
+
+  const JsonConverterHelper({this.forMapKey = false});
 
   @override
-  Object? serialize(
+  Expression? serialize(
     DartType targetType,
-    String expression,
+    Expression expression,
     TypeHelperContextWithConfig context,
   ) {
     final converter = _typeConverter(targetType, context);
 
     if (converter == null) {
+      return null;
+    }
+
+    if (forMapKey &&
+        (!coreStringTypeChecker.isExactlyType(converter.jsonType) ||
+            converter.jsonType.isNullableType)) {
       return null;
     }
 
@@ -52,14 +63,20 @@ Json? $converterToJsonName<Json, Value>(
   }
 
   @override
-  Object? deserialize(
+  Expression? deserialize(
     DartType targetType,
-    String expression,
+    Expression expression,
     TypeHelperContextWithConfig context,
     bool defaultProvided,
   ) {
     final converter = _typeConverter(targetType, context);
     if (converter == null) {
+      return null;
+    }
+
+    if (forMapKey &&
+        (!coreStringTypeChecker.isExactlyType(converter.jsonType) ||
+            converter.jsonType.isNullableType)) {
       return null;
     }
 
@@ -76,7 +93,12 @@ Value? $converterFromJsonName<Json, Value>(
         converter,
         name: converterFromJsonName,
         targetType: targetType,
-        expression: expression,
+        expression: converter.jsonType.isDartCoreDouble
+            ? expression
+                  .asA(refer('num?'))
+                  .nullSafeProperty('toDouble')
+                  .call([])
+            : expression,
         callback: '${converter.accessString}.fromJson',
       );
     }
@@ -89,20 +111,23 @@ Value? $converterFromJsonName<Json, Value>(
   }
 }
 
-String _nullableJsonConverterLambdaResult(
+Expression _nullableJsonConverterLambdaResult(
   _JsonConvertData converter, {
   required String name,
   required DartType targetType,
-  required String expression,
+  required Expression expression,
   required String callback,
 }) {
   final jsonDisplayString = typeToCode(converter.jsonType);
   final fieldTypeDisplayString = converter.isGeneric
-      ? typeToCode(targetType)
-      : typeToCode(converter.fieldType);
+      ? typeToCode(targetType.promoteNonNullable())
+      : typeToCode(converter.fieldType.promoteNonNullable());
 
-  return '$name<$jsonDisplayString, $fieldTypeDisplayString>('
-      '$expression, $callback)';
+  return refer(name).call(
+    [expression, refer(callback)],
+    {},
+    [refer(jsonDisplayString), refer(fieldTypeDisplayString)],
+  );
 }
 
 class _JsonConvertData {
@@ -145,15 +170,19 @@ class _JsonConvertData {
 /// Used to make sure we create a smart encoding function.
 bool? hasConverterNullEncode(
   DartType targetType,
-  TypeHelperContextWithConfig ctx,
-) {
+  TypeHelperContextWithConfig ctx, {
+  bool forNullCheck = false,
+}) {
   final data = _typeConverter(targetType, ctx);
 
   if (data == null) {
     return null;
   }
 
-  return data.jsonType.isNullableType;
+  return data.jsonType.isNullableType ||
+      (forNullCheck &&
+          !data.fieldType.isNullableType &&
+          targetType.isNullableType);
 }
 
 _JsonConvertData? _typeConverter(
@@ -171,26 +200,26 @@ _JsonConvertData? _typeConverter(
       .whereType<_ConverterMatch>()
       .toList();
 
-  var matchingAnnotations = converterMatches(
-    ctx.fieldElement.getter?.metadata.annotations ?? [],
-  );
+  var matchingAnnotations = <_ConverterMatch>[];
+  for (final field in fieldHierarchyFor(ctx.fieldElement)) {
+    matchingAnnotations = converterMatches(
+      field.getter?.metadata.annotations ?? [],
+    );
+    if (matchingAnnotations.isNotEmpty) break;
+    matchingAnnotations = converterMatches(field.metadata.annotations);
+    if (matchingAnnotations.isNotEmpty) break;
+  }
 
   if (matchingAnnotations.isEmpty) {
     matchingAnnotations = converterMatches(
-      ctx.fieldElement.metadata.annotations,
+      ctx.classElement.metadata.annotations,
     );
 
     if (matchingAnnotations.isEmpty) {
-      matchingAnnotations = converterMatches(
-        ctx.classElement.metadata.annotations,
-      );
-
-      if (matchingAnnotations.isEmpty) {
-        matchingAnnotations = ctx.config.converters
-            .map((e) => _compatibleMatch(targetType, null, e))
-            .whereType<_ConverterMatch>()
-            .toList();
-      }
+      matchingAnnotations = ctx.config.converters
+          .map((e) => _compatibleMatch(targetType, null, e))
+          .whereType<_ConverterMatch>()
+          .toList();
     }
   }
 
@@ -206,17 +235,27 @@ _JsonConvertData? _typeConverterFrom(
   }
 
   if (matchingAnnotations.length > 1) {
-    final targetTypeCode = typeToCode(targetType);
-    throw InvalidGenerationSourceError(
-      'Found more than one matching converter for `$targetTypeCode`.',
-      element: matchingAnnotations[1].elementAnnotation?.element,
-    );
+    final exactMatches = matchingAnnotations
+        .where((e) => e.fieldType.isNullableType == targetType.isNullableType)
+        .toList();
+    if (exactMatches.isNotEmpty) {
+      matchingAnnotations = exactMatches;
+    }
+
+    if (matchingAnnotations.length > 1) {
+      final targetTypeCode = typeToCode(targetType);
+      throw InvalidGenerationSourceError(
+        'Found more than one matching converter for `$targetTypeCode`.',
+        element: matchingAnnotations[1].elementAnnotation?.element,
+      );
+    }
   }
 
   final match = matchingAnnotations.single;
 
   final annotationElement = match.elementAnnotation?.element;
-  if (annotationElement is PropertyAccessorElement) {
+  if (annotationElement is PropertyAccessorElement &&
+      match.genericTypeArg == null) {
     final enclosing = annotationElement.enclosingElement;
 
     var accessString = annotationElement.name;
@@ -253,7 +292,7 @@ _JsonConvertData? _typeConverterFrom(
   }
 
   return _JsonConvertData.className(
-    match.annotation.type!.element!.name!,
+    typeToCode(match.annotation.type!),
     reviver.accessor,
     match.jsonType,
     match.fieldType,
@@ -281,7 +320,11 @@ _ConverterMatch? _compatibleMatch(
   ElementAnnotation? annotation,
   DartObject constantValue,
 ) {
-  final converterClassElement = constantValue.type!.element as ClassElement;
+  final constantType = constantValue.type;
+  if (constantType is! InterfaceType) {
+    return null;
+  }
+  final converterClassElement = constantType.element as ClassElement;
 
   final jsonConverterSuper = converterClassElement.allSupertypes
       .where((e) => _jsonConverterChecker.isExactly(e.element))
@@ -307,8 +350,35 @@ _ConverterMatch? _compatibleMatch(
     );
   }
 
-  if (fieldType is TypeParameterType && targetType is TypeParameterType) {
-    assert(annotation?.element is! PropertyAccessorElement);
+  if (converterClassElement.typeParameters.isNotEmpty) {
+    final hasExplicitTypeArgs = annotation == null
+        ? constantType.typeArguments.every((t) => t is! DynamicType)
+        : annotation.element is PropertyAccessorElement
+        ? constantType.typeArguments.every((t) => t is! DynamicType)
+        : annotation.toSource().contains('<');
+    if (hasExplicitTypeArgs) {
+      final instantiatedSuper = constantType.allSupertypes
+          .where((e) => _jsonConverterChecker.isExactly(e.element))
+          .singleOrNull;
+      if (instantiatedSuper != null) {
+        final instantiatedFieldType = instantiatedSuper.typeArguments[0];
+        if (instantiatedFieldType == targetType ||
+            instantiatedFieldType == targetType.promoteNonNullable()) {
+          return _ConverterMatch(
+            annotation,
+            constantValue,
+            instantiatedSuper.typeArguments[1],
+            null,
+            instantiatedFieldType,
+          );
+        }
+      }
+    }
+  }
+
+  final matchedTargetParam = _matchGenericTypeParam(fieldType, targetType);
+  if (matchedTargetParam != null &&
+      (!fieldType.isNullableType || targetType.isNullableType)) {
     assert(converterClassElement.typeParameters.isNotEmpty);
     if (converterClassElement.typeParameters.length > 1) {
       throw InvalidGenerationSourceError(
@@ -319,15 +389,61 @@ _ConverterMatch? _compatibleMatch(
       );
     }
 
+    final converterTypeParam = converterClassElement.typeParameters.single;
+    final canBeNullable = converterTypeParam.bound?.isNullableType ?? true;
+    final nullableSuffix =
+        matchedTargetParam.isNullableType &&
+            !fieldType.isNullableType &&
+            canBeNullable
+        ? '?'
+        : '';
+
+    final instantiatedConverter = converterClassElement.instantiate(
+      typeArguments: [matchedTargetParam.promoteNonNullable()],
+      nullabilitySuffix: constantType.nullabilitySuffix,
+    );
+    final instantiatedSuper = instantiatedConverter.allSupertypes
+        .where((e) => _jsonConverterChecker.isExactly(e.element))
+        .single;
+    final substitutedFieldType = fieldType.isNullableType
+        ? instantiatedSuper.typeArguments[0]
+        : instantiatedSuper.typeArguments[0].promoteNonNullable();
+
     return _ConverterMatch(
       annotation,
       constantValue,
-      jsonConverterSuper.typeArguments[1],
-      '${targetType.element.name}${targetType.isNullableType ? '?' : ''}',
-      fieldType,
+      instantiatedSuper.typeArguments[1],
+      '${matchedTargetParam.element.name}$nullableSuffix',
+      substitutedFieldType,
     );
   }
 
+  return null;
+}
+
+TypeParameterType? _matchGenericTypeParam(
+  DartType rawFieldType,
+  DartType targetType,
+) {
+  if (rawFieldType is TypeParameterType && targetType is TypeParameterType) {
+    return targetType;
+  }
+  if (rawFieldType is InterfaceType &&
+      targetType is InterfaceType &&
+      rawFieldType.element == targetType.element &&
+      rawFieldType.typeArguments.length == targetType.typeArguments.length) {
+    TypeParameterType? found;
+    for (var i = 0; i < rawFieldType.typeArguments.length; i++) {
+      final rawArg = rawFieldType.typeArguments[i];
+      final targetArg = targetType.typeArguments[i];
+      if (rawArg == targetArg) continue;
+      final sub = _matchGenericTypeParam(rawArg, targetArg);
+      if (sub == null) return null;
+      if (found != null && found.element != sub.element) return null;
+      found = sub;
+    }
+    return found;
+  }
   return null;
 }
 

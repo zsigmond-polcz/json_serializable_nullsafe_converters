@@ -1,3 +1,90 @@
+## 7.0.0-wip
+
+- `type_helper.dart`: **BREAKING** Changed `TypeHelper.serialize`,
+  `TypeHelper.deserialize`, `TypeHelperContext.serialize`, and
+  `TypeHelperContext.deserialize` parameter and return types from
+  `String`/`Object?` to `Expression`/`Expression?` (from
+  `package:code_builder`).
+- **BREAKING** Reject classes where multiple `fromJson` fields map to the same
+  JSON key, even when `includeToJson: false` is set. Use `@JsonKey(readValue:
+  ...)` when a field needs to inspect or derive a value from another key in the
+  source map.
+  ([#1622](https://github.com/google/json_serializable.dart/issues/1622))
+
+## 6.15.2
+
+- Revert the duplicate `fromJson` key check added in 6.15.0, allowing multiple
+  `fromJson` fields to read from the same JSON key when at most one is included
+  in `toJson` (for example, via `@JsonKey(includeToJson: false)`).
+  ([#1622](https://github.com/google/json_serializable.dart/issues/1622))
+
+## 6.15.1
+
+- Fix compilation ambiguity when using `package:source_helper` `>= 1.4.0`.
+
+## 6.15.0
+
+- Fix `Record` serialization and default value handling, including nullable
+  empty records `()?`, non-nullable records with defaults, single-positional
+  record defaults, record and non-`String` map literals in
+  `@JsonKey(defaultValue: ...)`, and conditional `? :` constructor defaults.
+- Fix `createJsonSchema` to emit an `enum` constraint (and `default`) for
+  enum-typed fields, respecting `@JsonValue` and `JsonEnum.valueField`.
+  ([#1577](https://github.com/google/json_serializable.dart/issues/1577))
+- Support `fromJson` and `toJson` on classes that extend `JsonKey`.
+  ([#1057](https://github.com/google/json_serializable.dart/issues/1057))
+- Preserve `typedef` alias names in generated code.
+  ([#1124](https://github.com/google/json_serializable.dart/issues/1124))
+- Fix `genericArgumentFactories: true` when `toJson` is inherited from a
+  generic mixin or superclass.
+  ([#1208](https://github.com/google/json_serializable.dart/issues/1208))
+- Preserve field declaration order in `toJson` for classes with primary
+  constructor declaring parameters.
+  ([#1599](https://github.com/google/json_serializable.dart/issues/1599))
+- Fix `Map` key and enum handling, including custom `String`-backed
+  `JsonConverter`s and `dateTimeUtc: true` on `Map` keys, `int`-encoded enum
+  `Map` keys, `Map<Object, V>` / `Map<dynamic, V>`, decoding `null` to
+  `@JsonValue(null)` enum entries on non-nullable fields (preserving explicit
+  `null` over `defaultValue` when the key is present),
+  `@JsonEnum(valueField: 'name')`, and rejecting getter-backed
+  `JsonEnum.valueField`s.
+- `JsonKey.unknownEnumValue`: Added support for `Map` values.
+  ([#1093](https://github.com/google/json_serializable.dart/issues/1093))
+- Prefer `JsonConverter`s with matching nullability when both nullable and
+  non-nullable converters for the same type are present.
+  ([#1339](https://github.com/google/json_serializable.dart/issues/1339))
+- Fix field discovery, inheritance, and class configuration edge cases,
+  including covariant and setter-only overrides, `hashCode`/`runtimeType`
+  overrides, `createFactory: false` with `includeToJson: true`,
+  `disallowUnrecognizedKeys` with `includeFromJson: false`, generic
+  `includeIfNull: false` map entries, duplicate `fromJson` key detection, and
+  `createPerFieldToJson` when a field is named `Object`.
+- Fix `createJsonSchema` default value handling for non-empty `List`, `Set`,
+  and `Map` constants, `int` defaults on `num`/`double` fields, and function
+  tear-off defaults, as well as nullable self-references and private fields.
+- Fix `JsonConverter`, `@JsonKey(fromJson: ..., toJson: ...)`, `JsonHelper`,
+  and extension type edge cases across generic converters, nullable fields,
+  constructor parameter annotations, and custom `fromJson`/`toJson` signatures.
+- Fix `JsonKey.explicitJsonNullWhenNonNullField` for `Record`, `Function`,
+  `DateTime`, generic argument factories, and `toJson` callbacks named `value`.
+- Allow `build` 5.0.0.
+- Require `sdk: ^3.12.0`.
+
+## 6.14.1
+
+- Require `analyzer: '>=10.0.0 <15.0.0'`
+
+## 6.14.0
+
+- Support `JsonKey.explicitJsonNullWhenNonNullField` for PATCH-style tri-state
+  JSON fields: distinguish omitted keys from explicit `null` in `fromJson` and
+  emit explicit JSON `null` in `toJson` when the Dart field is non-null.
+- Require `json_annotation: '>=4.12.0 <4.13.0'`
+
+## 6.13.2
+
+- Require `analyzer: '>=10.0.0 <14.0.0'`
+
 ## 6.13.1
 
 - Improve error message when generating code for `Record` types with unsupported
@@ -11,9 +98,9 @@
 
 ## 6.13.0
 
-- Fix schema generation for many different types of fields. 
+- Fix schema generation for many different types of fields.
   ([#1549](https://github.com/google/json_serializable.dart/issues/1549))
-- Support `JsonSerializable.dateTimeUtc` configuration option. 
+- Support `JsonSerializable.dateTimeUtc` configuration option.
   ([#1371](https://github.com/google/json_serializable.dart/issues/1371))
 - Remove `json_schema` from `dependencies` (it is only used in tests).
 
@@ -78,7 +165,7 @@
 
 ## 6.9.3
 
-- Error out if the target package does not have a language version of `3.0` or 
+- Error out if the target package does not have a language version of `3.0` or
   greater.
 
 ## 6.9.2
@@ -101,7 +188,7 @@
 - Add type arguments to `Map` literals used for `Record` serialization.
 - Add support for `JsonSerializable(createJsonKeys: true)`.
   ([#1401](https://github.com/google/json_serializable.dart/pull/1401))
-- Handle decoding an `int` value from a `double` literal. 
+- Handle decoding an `int` value from a `double` literal.
   This now matches the behavior of `double` values being encoded as `int`.
 
 ## 6.7.1

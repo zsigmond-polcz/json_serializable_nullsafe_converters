@@ -4,6 +4,7 @@
 
 import 'package:analyzer/dart/element/element.dart';
 import 'package:build/build.dart';
+import 'package:code_builder/code_builder.dart';
 import 'package:source_gen/source_gen.dart';
 
 import '../type_helper.dart';
@@ -31,13 +32,18 @@ class GeneratorHelper extends HelperCore
 
   @override
   void addMember(String memberContent) {
-    _addedMembers.add(memberContent);
+    if (memberContent.trim().isNotEmpty) {
+      _addedMembers.add(memberContent);
+    }
   }
 
   @override
   Iterable<TypeHelper> get allTypeHelpers => _generator.allHelpers;
 
-  Iterable<String> generate() sync* {
+  Iterable<Spec> generate() =>
+      runWithTargetLibrary(element.library, () => _generate().toList());
+
+  Iterable<Spec> _generate() sync* {
     assert(_addedMembers.isEmpty);
 
     if (config.genericArgumentFactories && element.typeParameters.isEmpty) {
@@ -50,7 +56,46 @@ class GeneratorHelper extends HelperCore
       );
     }
 
-    final sortedFields = createSortedFieldSet(element);
+    final result = _processFields();
+    if (result.fromJsonMethod case final fromJsonMethod?) {
+      yield fromJsonMethod;
+    }
+
+    final accessibleFieldSet = result.accessibleFields;
+
+    if (config.createFieldMap) {
+      yield createFieldMap(accessibleFieldSet);
+    }
+
+    if (config.createJsonKeys) {
+      yield createJsonKeys(accessibleFieldSet);
+    }
+
+    if (config.createPerFieldToJson) {
+      yield createPerFieldToJson(accessibleFieldSet);
+    }
+
+    if (config.createToJson) {
+      yield createToJson(accessibleFieldSet);
+    }
+
+    if (config.createJsonSchema) {
+      yield createJsonSchema();
+    }
+
+    for (final member in _addedMembers) {
+      assert(member.trim().isNotEmpty);
+      yield Code(member);
+    }
+  }
+
+  ({Set<FieldElement> accessibleFields, Spec? fromJsonMethod})
+  _processFields() {
+    final sortedFields = createSortedFieldSet(
+      element,
+      keepObjectMemberOverride: hasJsonKeyAnnotation,
+    );
+    recordFieldOverrideChains(element, sortedFields);
 
     // Used to keep track of why a field is ignored. Useful for providing
     // helpful errors when generating constructor calls that try to use one of
@@ -81,40 +126,16 @@ class GeneratorHelper extends HelperCore
       },
     );
 
-    var accessibleFieldSet = accessibleFields.values.toSet();
-    if (config.createFactory) {
-      final createResult = createFactory(accessibleFields, unavailableReasons);
-      yield createResult.output;
+    final explicitToJsonFields = sortedFields
+        .where(
+          (element) =>
+              element.getter != null && jsonKeyFor(element).explicitYesToJson,
+        )
+        .toList();
 
-      final fieldsToUse = accessibleFields.entries
-          .where((e) => createResult.usedFields.contains(e.key))
-          .map((e) => e.value)
-          .toList();
-
-      // Need to add candidates BACK even if they are not used in the factory if
-      // they are forced to be used for toJSON
-      for (var candidate in sortedFields.where(
-        (element) =>
-            jsonKeyFor(element).explicitYesToJson &&
-            !fieldsToUse.contains(element),
-      )) {
-        fieldsToUse.add(candidate);
-      }
-
-      // Need the fields to maintain the original source ordering
-      fieldsToUse.sort(
-        (a, b) => sortedFields.indexOf(a).compareTo(sortedFields.indexOf(b)),
-      );
-
-      accessibleFieldSet = fieldsToUse.toSet();
-    }
-
-    accessibleFieldSet
-      ..removeWhere((element) => jsonKeyFor(element).explicitNoToJson)
-      // Check for duplicate JSON keys due to colliding annotations. We do this
-      // now, since we have a final field list after any pruning done by
-      // `_writeCtor`.
-      ..fold(<String>{}, (Set<String> set, fe) {
+    void checkForDuplicateKeys(Iterable<FieldElement> fields) {
+      final set = <String>{};
+      for (final fe in fields) {
         final jsonKey = nameAccess(fe);
         if (!set.add(jsonKey)) {
           throw InvalidGenerationSourceError(
@@ -122,29 +143,54 @@ class GeneratorHelper extends HelperCore
             element: fe,
           );
         }
-        return set;
-      });
-
-    if (config.createFieldMap) {
-      yield createFieldMap(accessibleFieldSet);
+      }
     }
 
-    if (config.createJsonKeys) {
-      yield createJsonKeys(accessibleFieldSet);
+    var fieldsToUse = accessibleFields.values.toList();
+    Spec? fromJsonMethod;
+
+    if (config.createFactory) {
+      final createResult = createFactory(
+        accessibleFields,
+        unavailableReasons,
+        explicitToJsonFields: config.createToJson
+            ? explicitToJsonFields
+            : const [],
+      );
+      fromJsonMethod = createResult.method;
+
+      fieldsToUse = accessibleFields.entries
+          .where((e) => createResult.usedFields.contains(e.key))
+          .map((e) => e.value)
+          .toList();
+
+      checkForDuplicateKeys(fieldsToUse);
     }
 
-    if (config.createPerFieldToJson) {
-      yield createPerFieldToJson(accessibleFieldSet);
+    // Need to add candidates BACK even if they are not used in the factory if
+    // they are forced to be used for toJSON
+    for (var candidate in explicitToJsonFields) {
+      if (!fieldsToUse.contains(candidate)) {
+        fieldsToUse.add(candidate);
+      }
     }
 
-    if (config.createToJson) {
-      yield* createToJson(accessibleFieldSet);
-    }
+    // Need the fields to maintain the original source ordering
+    fieldsToUse.sort(
+      (a, b) => sortedFields.indexOf(a).compareTo(sortedFields.indexOf(b)),
+    );
 
-    if (config.createJsonSchema) {
-      yield createJsonSchema();
-    }
+    final accessibleFieldSet = fieldsToUse.toSet()
+      ..removeWhere((element) => jsonKeyFor(element).explicitNoToJson);
 
-    yield* _addedMembers;
+    // Check for duplicate JSON keys due to colliding annotations. We do this
+    // now, since we have a final field list after any pruning done by
+    // `_writeCtor`.
+    checkForDuplicateKeys(accessibleFieldSet);
+
+    return (
+      accessibleFields: accessibleFieldSet,
+      fromJsonMethod: fromJsonMethod,
+    );
   }
 }

@@ -3,22 +3,26 @@
 // BSD-style license that can be found in the LICENSE file.
 
 import 'package:analyzer/dart/element/type.dart';
+import 'package:code_builder/code_builder.dart';
 import 'package:source_gen/source_gen.dart';
 import 'package:source_helper/source_helper.dart';
 
+import '../constants.dart';
+import '../default_container.dart';
 import '../enum_utils.dart';
 import '../json_key_utils.dart';
 import '../type_helper.dart';
+import '../utils.dart';
 
-final simpleExpression = RegExp('^[a-zA-Z_]+\$');
+final simpleExpression = RegExp(r'^[a-zA-Z_]+$');
 
 class EnumHelper extends TypeHelper<TypeHelperContextWithConfig> {
   const EnumHelper();
 
   @override
-  String? serialize(
+  Expression? serialize(
     DartType targetType,
-    String expression,
+    Expression expression,
     TypeHelperContextWithConfig context,
   ) {
     final memberContent = enumValueMapFromType(targetType);
@@ -29,18 +33,20 @@ class EnumHelper extends TypeHelper<TypeHelperContextWithConfig> {
 
     context.addMember(memberContent);
 
+    final map = refer(constMapName(targetType)).index(expression);
+
     if (targetType.isNullableType ||
         enumFieldWithNullInEncodeMap(targetType) == true) {
-      return '${constMapName(targetType)}[$expression]';
+      return map;
     } else {
-      return '${constMapName(targetType)}[$expression]!';
+      return map.nullChecked;
     }
   }
 
   @override
-  String? deserialize(
+  Expression? deserialize(
     DartType targetType,
-    String expression,
+    Expression expression,
     TypeHelperContextWithConfig context,
     bool defaultProvided,
   ) {
@@ -50,10 +56,13 @@ class EnumHelper extends TypeHelper<TypeHelperContextWithConfig> {
       return null;
     }
 
+    final exprStr = toCodeString(expression);
+    final isMapKey = exprStr == keyParam;
     final jsonKey = jsonKeyForField(context.fieldElement, context.config);
+    final unknownEnumValue = isMapKey ? null : jsonKey.unknownEnumValue;
 
     if (!targetType.isNullableType &&
-        jsonKey.unknownEnumValue == jsonKeyNullForUndefinedEnumValueFieldName) {
+        unknownEnumValue == jsonKeyNullForUndefinedEnumValueFieldName) {
       // If the target is not nullable,
       throw InvalidGenerationSourceError(
         '`$jsonKeyNullForUndefinedEnumValueFieldName` cannot be used with '
@@ -62,22 +71,45 @@ class EnumHelper extends TypeHelper<TypeHelperContextWithConfig> {
       );
     }
 
-    String functionName;
-    if (targetType.isNullableType || defaultProvided) {
-      functionName = r'$enumDecodeNullable';
-    } else {
-      functionName = r'$enumDecode';
+    var expr = expression;
+    if (isMapKey) {
+      final encodedValues = enumEncodedValues(targetType);
+      if (encodedValues != null && encodedValues.any((v) => v is int)) {
+        final keyString = context.config.anyMap
+            ? castExpression(expr, 'String')
+            : expr;
+        if (encodedValues.every((v) => v is int || v == null)) {
+          expr = refer('int.parse').call([keyString]);
+        } else {
+          expr = refer('int.tryParse').call([keyString]).ifNullThen(keyString);
+        }
+      }
     }
+
+    final nullEnumValue = enumValueForNull(targetType);
+
+    final functionName =
+        (targetType.isNullableType || defaultProvided || nullEnumValue != null)
+        ? r'$enumDecodeNullable'
+        : r'$enumDecode';
 
     context.addMember(memberContent);
 
-    final args = [
-      constMapName(targetType),
-      expression,
-      if (jsonKey.unknownEnumValue != null)
-        'unknownValue: ${jsonKey.unknownEnumValue}',
-    ];
+    final namedArgs = <String, Expression>{
+      if (unknownEnumValue != null)
+        'unknownValue': CodeExpression(Code(unknownEnumValue)),
+    };
 
-    return '$functionName(${args.join(', ')})';
+    final decoded = refer(
+      functionName,
+    ).call([refer(constMapName(targetType)), expr], namedArgs);
+    if (!targetType.isNullableType && nullEnumValue != null) {
+      final withNullEnum = decoded.ifNullThen(refer(nullEnumValue));
+      if (defaultProvided) {
+        return DefaultContainer(expr, withNullEnum, checkKeyPresence: true);
+      }
+      return withNullEnum;
+    }
+    return decoded;
   }
 }
